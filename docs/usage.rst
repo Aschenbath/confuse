@@ -519,3 +519,52 @@ Then flatten or dump the configuration like so:
     config.dump(redact=True)
 
 The resulting YAML will contain "key: REDACTED" instead of the original data.
+
+Loading a Separate Database Configuration
+-----------------------------------------
+
+Use ``Configuration.set_file()`` to load an additional YAML file into the
+same configuration. Its contents overlay earlier sources, so put values
+under the key where you want to access them. For example, ``config.yaml``
+can provide the application's database defaults:
+
+.. code-block:: yaml
+
+    db:
+      host: localhost
+      port: 5432
+
+A separate ``db.yaml`` overrides the host:
+
+.. code-block:: yaml
+
+    db:
+      host: db.example.test
+
+>>> import confuse
+>>> config = confuse.Configuration("DatabaseExample", read=False)
+>>> config.set_file("config.yaml")
+>>> config.set_file("db.yaml")
+>>> config["db"]["host"].get(str)
+'db.example.test'
+>>> config["db"]["port"].get(int)
+5432
+
+The last file has highest priority. Resolve individual values as shown
+above to keep fallback values from earlier sources. ``config["db"].get()``
+returns the highest-priority mapping as a whole instead of merging it.
+
+``read=False`` disables automatic file discovery in this example. In an
+application that uses the usual search paths, keep the normal
+``Configuration`` constructor and pass a path such as
+``os.path.join(config.config_dir(), "db.yaml")`` to ``set_file()``.
+Use ``base_for_paths=True`` if relative filenames in that file should
+resolve against its own directory.
+
+For an optional file, add a ``YamlSource`` with ``optional=True`` using
+``config.set()``. A missing file then contributes an empty source; invalid
+YAML still raises ``ConfigReadError``. For example:
+
+>>> config.set(confuse.YamlSource("optional-db.yaml", optional=True))
+>>> config["db"]["host"].get(str)
+'db.example.test'

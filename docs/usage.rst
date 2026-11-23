@@ -415,6 +415,39 @@ view. A related method, ``add()``, works similarly but instead adds a new
 defaults for options that may be overridden by previously-loaded configuration
 files.
 
+TOML Configuration
+------------------
+
+YAML remains the default format. To use TOML for automatically discovered user
+configuration, package defaults, and exported configuration, select it
+explicitly:
+
+.. code-block:: python
+
+    config = confuse.Configuration("MyApp", __name__, format="toml")
+    # Searches for config.toml and config_default.toml.
+    port = config["server"]["port"].get(int)
+    text = config.dump()
+
+``LazyConfig`` accepts the same ``format="toml"`` option. Only the selected
+format is used for automatic discovery, so a stray YAML file cannot unexpectedly
+override a TOML application or vice versa.
+
+To mix formats, use ``config.set_file("settings.toml")`` or add a
+``confuse.TomlSource``. ``set_file`` recognizes the ``.toml`` extension
+case-insensitively; other filenames keep their existing YAML parsing behavior.
+TOML sources support ``default``, ``optional`` and ``base_for_paths`` just like
+YAML sources. Both kinds participate in normal precedence, template validation,
+path resolution, redaction and ``reload()``. Reloading removes keys deleted from
+a file, while a failed read leaves its last valid values intact.
+
+``config.dump(format="toml")`` or ``config.dump(format="yaml")`` overrides the
+output format for one call. Both support ``full=False`` and ``redact=True``.
+TOML export does not retain comments or original formatting. TOML has no null
+value, so exporting a configuration containing ``None`` raises ``TypeError``
+instead of silently losing that value. Date and time values use TOML's native
+types. Custom YAML loaders and YAML comment restoration apply only to YAML.
+
 YAML Tweaks
 -----------
 

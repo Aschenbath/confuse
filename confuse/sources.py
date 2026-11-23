@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import yaml
 
 from . import yaml_util
+from .exceptions import ConfigReadError
 from .util import build_dict
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 class ConfigSource(dict[str, Any]):
@@ -64,8 +71,10 @@ class ConfigSource(dict[str, Any]):
             raise TypeError("source value must be a dict")
 
 
-class YamlSource(ConfigSource):
-    """A configuration data source that reads from a YAML file."""
+class FileSource(ConfigSource):
+    """Base class for reloadable configuration sources backed by a file."""
+
+    format_name = "File"
 
     def __init__(
         self,
@@ -73,9 +82,8 @@ class YamlSource(ConfigSource):
         default: bool = False,
         base_for_paths: bool = False,
         optional: bool = False,
-        loader: type[yaml.SafeLoader] = yaml_util.Loader,
     ):
-        """Create a YAML data source by reading data from a file.
+        """Create a data source by reading data from a file.
 
         May raise a `ConfigReadError`. However, if `optional` is
         enabled, this exception will not be raised in the case when the
@@ -85,26 +93,67 @@ class YamlSource(ConfigSource):
         if filename is not None:
             filename = os.path.abspath(filename)
         super().__init__({}, filename, default, base_for_paths)
-        self.loader = loader
         self.optional = optional
         self.load()
 
     def load(self) -> None:
-        """Load YAML data from the source's filename."""
+        """Replace the source's contents after successfully reading its file."""
         if self.optional and (
             self.filename is None or not os.path.isfile(self.filename)
         ):
             value: object = {}
         elif self.filename is None:
-            raise TypeError("filename is required for YamlSource")
+            raise TypeError(f"filename is required for {type(self).__name__}")
         else:
-            value = yaml_util.load_yaml(self.filename, loader=self.loader) or {}
+            value = self._read_file(self.filename)
 
         if isinstance(value, dict):
+            self.clear()
             self.update(value)
         else:
-            # We enforce that the loaded YAML is a mapping (dict)
-            raise TypeError(f"YAML config must be a mapping, got {type(value)}")
+            raise TypeError(
+                f"{self.format_name} config must be a mapping, got {type(value)}"
+            )
+
+    def _read_file(self, filename: str) -> object:
+        raise NotImplementedError
+
+
+class YamlSource(FileSource):
+    """A configuration data source that reads from a YAML file."""
+
+    format_name = "YAML"
+
+    def __init__(
+        self,
+        filename: str | None = None,
+        default: bool = False,
+        base_for_paths: bool = False,
+        optional: bool = False,
+        loader: type[yaml.SafeLoader] = yaml_util.Loader,
+    ):
+        self.loader = loader
+        super().__init__(filename, default, base_for_paths, optional)
+
+    def _read_file(self, filename: str) -> object:
+        return yaml_util.load_yaml(filename, loader=self.loader) or {}
+
+
+class TomlSource(FileSource):
+    """A configuration data source that reads a UTF-8 TOML file.
+
+    Accepts the same filename, default, base_for_paths, and optional
+    parameters as `FileSource`.
+    """
+
+    format_name = "TOML"
+
+    def _read_file(self, filename: str) -> object:
+        try:
+            with open(filename, "rb") as stream:
+                return tomllib.load(stream)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigReadError(filename, exc) from exc
 
 
 class EnvSource(ConfigSource):

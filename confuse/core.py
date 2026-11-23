@@ -43,7 +43,7 @@ import yaml
 
 from . import templates, util, yaml_util
 from .exceptions import ConfigError, ConfigTypeError, NotFoundError
-from .sources import ConfigSource, EnvSource, YamlSource
+from .sources import ConfigSource, EnvSource, FileSource, TomlSource, YamlSource
 
 if TYPE_CHECKING:
     import builtins
@@ -523,6 +523,8 @@ class Configuration(RootView):
         modname: str | None = None,
         read: bool = True,
         loader: type[yaml_util.Loader] = yaml_util.Loader,
+        *,
+        format: str = "yaml",
     ):
         """Create a configuration object by reading the
         automatically-discovered config files for the application for a
@@ -532,9 +534,18 @@ class Configuration(RootView):
         `read` to disable automatic reading of all discovered
         configuration files. Use this when creating a configuration
         object at module load time and then call the `read` method
-        later. Specify the Loader class as `loader`.
+        later. Specify the YAML Loader class as `loader`. Set `format` to
+        ``"toml"`` to discover ``config.toml`` and ``config_default.toml``
+        and to use TOML for `dump`. The default remains ``"yaml"``.
         """
         super().__init__([])
+        if format not in ("yaml", "toml"):
+            raise ValueError(f"Unknown configuration format: {format}")
+        self.format = format
+        self.config_filename = CONFIG_FILENAME if format == "yaml" else "config.toml"
+        self.default_filename = (
+            DEFAULT_FILENAME if format == "yaml" else "config_default.toml"
+        )
         self.appname = appname
         self.modname = modname
         self.loader = loader
@@ -556,29 +567,37 @@ class Configuration(RootView):
 
         The file may not exist.
         """
-        return os.path.join(self.config_dir(), CONFIG_FILENAME)
+        return os.path.join(self.config_dir(), self.config_filename)
+
+    def _file_source(
+        self,
+        filename: str,
+        *,
+        default: bool = False,
+        base_for_paths: bool = False,
+        optional: bool = False,
+    ) -> FileSource:
+        if os.path.splitext(filename)[1].lower() == ".toml":
+            return TomlSource(filename, default, base_for_paths, optional)
+        return YamlSource(filename, default, base_for_paths, optional, self.loader)
 
     def _add_user_source(self) -> None:
-        """Add the configuration options from the YAML file in the
+        """Add the configuration options from the file in the
         user's configuration directory (given by `config_dir`) if it
         exists.
         """
         filename = self.user_config_path()
-        self.add(YamlSource(filename, loader=self.loader, optional=True))
+        self.add(self._file_source(filename, optional=True))
 
     def _add_default_source(self) -> None:
         """Add the package's default configuration settings. This looks
-        for a YAML file located inside the package for the module
+        for a file in the selected format inside the package for the module
         `modname` if it was given.
         """
         if self.modname:
             if self._package_path:
-                filename = os.path.join(self._package_path, DEFAULT_FILENAME)
-                self.add(
-                    YamlSource(
-                        filename, loader=self.loader, optional=True, default=True
-                    )
-                )
+                filename = os.path.join(self._package_path, self.default_filename)
+                self.add(self._file_source(filename, optional=True, default=True))
 
     def read(self, user: bool = True, defaults: bool = True) -> None:
         """Find and read the files for this configuration and set them
@@ -599,7 +618,8 @@ class Configuration(RootView):
         If the application's ``...DIR`` environment variable is set, it
         is used as the configuration directory. Otherwise,
         platform-specific standard configuration locations are searched
-        for a ``config.yaml`` file. If no configuration file is found, a
+        for a ``config.yaml`` or ``config.toml`` file, according to `format`.
+        If no configuration file is found, a
         fallback path is used.
         """
         # If environment variable is set, use it.
@@ -615,7 +635,7 @@ class Configuration(RootView):
             configdirs = util.config_dirs()
             for confdir in configdirs:
                 appdir = os.path.join(confdir, self.appname)
-                if os.path.isfile(os.path.join(appdir, CONFIG_FILENAME)):
+                if os.path.isfile(os.path.join(appdir, self.config_filename)):
                     break
             else:
                 appdir = os.path.join(configdirs[0], self.appname)
@@ -630,18 +650,18 @@ class Configuration(RootView):
         return appdir
 
     def set_file(self, filename: str, base_for_paths: bool = False) -> None:
-        """Parses the file as YAML and inserts it into the configuration
+        """Parses the file and inserts it into the configuration
         sources with highest priority.
 
-        :param filename: Filename of the YAML file to load.
+        ``.toml`` files use TOML; other filenames retain YAML parsing.
+
+        :param filename: Filename of the configuration file to load.
         :param base_for_paths: Indicates whether the directory containing the
-            YAML file will be used as the base directory for resolving relative
-            path values stored in the YAML file. Otherwise, by default, the
+            file will be used as the base directory for resolving relative
+            path values stored in the file. Otherwise, by default, the
             directory returned by `config_dir()` will be used as the base.
         """
-        self.set(
-            YamlSource(filename, base_for_paths=base_for_paths, loader=self.loader)
-        )
+        self.set(self._file_source(filename, base_for_paths=base_for_paths))
 
     def set_env(self, prefix: str | None = None, sep: str = "__") -> None:
         """Create a configuration overlay at the highest priority from
@@ -665,8 +685,10 @@ class Configuration(RootView):
             prefix = f"{self.appname.upper()}_"
         self.set(EnvSource(prefix, sep=sep, loader=self.loader))
 
-    def dump(self, full: bool = True, redact: bool = False) -> str:
-        """Dump the Configuration object to a YAML file.
+    def dump(
+        self, full: bool = True, redact: bool = False, *, format: str | None = None
+    ) -> str:
+        """Serialize the Configuration object to YAML or TOML text.
 
         The order of the keys is determined from the default
         configuration file. All keys not in the default configuration
@@ -676,7 +698,13 @@ class Configuration(RootView):
                           as well
         :param redact:    Remove sensitive information (views with the `redact`
                           flag set) from the output
+        :param format:    Override the format chosen at construction.
+                          TOML cannot represent ``None`` and raises TypeError
+                          for unsupported values. TOML comments are not retained.
         """
+        format = self.format if format is None else format
+        if format not in ("yaml", "toml"):
+            raise ValueError(f"Unknown configuration format: {format}")
         if full:
             out_dict = self.flatten(redact=redact)
         else:
@@ -685,6 +713,11 @@ class Configuration(RootView):
             temp_root = RootView(sources)
             temp_root.redactions = self.redactions
             out_dict = temp_root.flatten(redact=redact)
+
+        if format == "toml":
+            import tomli_w
+
+            return tomli_w.dumps(out_dict)
 
         yaml_out = yaml.dump(
             out_dict,
@@ -697,7 +730,7 @@ class Configuration(RootView):
         # Restore comments to the YAML text.
         default_source = None
         for source in self.sources:
-            if source.default:
+            if source.default and isinstance(source, YamlSource):
                 default_source = source
                 break
         if default_source and default_source.filename:
@@ -713,11 +746,11 @@ class Configuration(RootView):
         """Reload all sources from the file system.
 
         This only affects sources that come from files (i.e.,
-        `YamlSource` objects); other sources, such as dictionaries
+        `FileSource` objects); other sources, such as dictionaries
         inserted with `add` or `set`, will remain unchanged.
         """
         for source in self.sources:
-            if isinstance(source, YamlSource):
+            if isinstance(source, FileSource):
                 source.load()
 
 
@@ -727,8 +760,10 @@ class LazyConfig(Configuration):
     the module level.
     """
 
-    def __init__(self, appname: str, modname: str | None = None) -> None:
-        super().__init__(appname, modname, False)
+    def __init__(
+        self, appname: str, modname: str | None = None, *, format: str = "yaml"
+    ) -> None:
+        super().__init__(appname, modname, False, format=format)
         self._materialized = False  # Have we read the files yet?
         self._lazy_prefix: list[
             ConfigSource

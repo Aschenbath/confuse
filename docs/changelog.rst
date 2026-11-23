@@ -9,9 +9,12 @@ below!
 Unreleased
 ----------
 
-..
-    New features
-    ~~~~~~~~~~~~
+New features
+~~~~~~~~~~~~
+
+- Add TOML configuration sources, automatic discovery with ``format="toml"``,
+  and TOML export. YAML and TOML sources can be layered in the same
+  configuration.
 
 ..
     Bug fixes
